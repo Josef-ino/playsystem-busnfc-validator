@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>NFC Ověření jízdenek</title>
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --panel: #111;
+    --blue: #0af;
+    --green: #2ecc71;
+    --red: #ff6b6b;
+    --muted: #bbb;
+    --border: rgba(0,170,255,0.15);
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    min-height: 100%;
+    background: var(--bg);
+    color: #fff;
+    font-family: "Segoe UI", Arial, sans-serif;
+    overflow: hidden;
+  }
+
+  body { padding: 8px; }
+
+  .app {
+    width: 100%;
+    max-width: 700px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  h1 {
+    margin: 0;
+    color: var(--blue);
+    text-align: center;
+    font-size: 24px;
+    line-height: 1.1;
+  }
+
+  .toprow {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .topcard {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 8px 10px;
+  }
+
+  .topcard .label {
+    font-size: 10px;
+    color: var(--muted);
+    margin-bottom: 2px;
+  }
+
+  .topcard .value {
+    font-size: 18px;
+    font-weight: 800;
+    color: var(--blue);
+    line-height: 1.1;
+    word-break: break-word;
+  }
+
+  .statusbar {
+    padding: 8px 10px;
+    border-radius: 12px;
+    background: #000;
+    border: 1px solid var(--border);
+    font-size: 13px;
+    line-height: 1.35;
+    color: var(--blue);
+    min-height: 40px;
+  }
+
+  .mainbtn {
+    min-height: 84px;
+    border: none;
+    border-radius: 18px;
+    font-size: 22px;
+    font-weight: 800;
+    cursor: pointer;
+    background: var(--blue);
+    color: #000;
+    box-shadow: 0 0 14px rgba(0,170,255,0.18);
+  }
+
+  .mainbtn:active {
+    background: #06c;
+    transform: scale(0.98);
+  }
+
+  #verifyOverlay {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 20px;
+    color: #fff;
+  }
+
+  #verifyOverlay.show { display: flex; }
+  #verifyOverlay.wait { background: #0a0a0a; }
+  #verifyOverlay.ok { background: #0b7a3b; }
+  #verifyOverlay.bad { background: #b3261e; }
+  #verifyOverlay.none { background: #444; }
+
+  #verifyIcon { font-size: 92px; line-height: 1; }
+  #verifyTitle { font-size: 34px; font-weight: 800; margin-top: 8px; }
+  #verifyTicket { font-size: 24px; font-weight: 700; margin-top: 10px; }
+  #verifyZones { font-size: 52px; font-weight: 800; margin-top: 8px; }
+  #verifyValid { font-size: 18px; margin-top: 10px; opacity: .95; }
+
+  #verifyClose {
+    margin-top: 20px;
+    width: 100%;
+    max-width: 340px;
+    min-height: 60px;
+    border: none;
+    border-radius: 14px;
+    font-size: 20px;
+    font-weight: 800;
+    background: #fff;
+    color: #000;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>Ověření jízdenek NFC</h1>
+
+  <div class="toprow">
+    <div class="topcard">
+      <div class="label">UID</div>
+      <div class="value" id="uid">-</div>
+    </div>
+    <div class="topcard">
+      <div class="label">Stav</div>
+      <div class="value" id="state">Připraveno</div>
+    </div>
+  </div>
+
+  <div class="statusbar" id="status">Stiskněte tlačítko a přiložte kartu.</div>
+
+  <button class="mainbtn" id="btnNFC">Zapnout NFC / Ověřit kartu</button>
+</div>
+
+<div id="verifyOverlay" class="wait">
+  <div id="verifyIcon">⌛</div>
+  <div id="verifyTitle">Připraveno na ověření</div>
+  <div id="verifyTicket">Přilož kartu k NFC</div>
+  <div id="verifyZones"></div>
+  <div id="verifyValid"></div>
+  <button id="verifyClose" onclick="closeVerify()">Zavřít</button>
+</div>
+
+<script>
+const SECRET_KEY = "demo123";
+const MIME_TYPE = "application/x-nfc-terminal";
+const FORMAT_VERSION = 1;
+
+let ndef = null;
+let busy = false;
+let cardUid = "-";
+
+function setStatus(msg, type = "info") {
+  const el = document.getElementById("status");
+  el.textContent = msg;
+  el.style.color = type === "success" ? "#2ecc71" : type === "error" ? "#ff6b6b" : "#0af";
+  document.getElementById("state").textContent = msg;
+}
+
+function minToStr(min) {
+  return min ? new Date(min * 60000).toLocaleString("cs-CZ") : "-";
+}
+
+function checksum(bytes) {
+  let h = 0x811c9dc5;
+  const key = new TextEncoder().encode(SECRET_KEY);
+  for (let i = 0; i < bytes.length; i++) { h ^= bytes[i]; h = Math.imul(h, 0x01000193) >>> 0; }
+  for (let i = 0; i < key.length; i++) { h ^= key[i]; h = Math.imul(h, 0x01000193) >>> 0; }
+  return h >>> 0;
+}
+
+function xorBytes(data) {
+  const key = new TextEncoder().encode(SECRET_KEY);
+  const out = new Uint8Array(data.length);
+  for (let i = 0; i < data.length; i++) out[i] = data[i] ^ key[i % key.length];
+  return out;
+}
+
+function decodeCard(bytes) {
+  if (bytes.length !== 24) return null;
+  const plain = xorBytes(bytes);
+  const dv = new DataView(plain.buffer);
+  if (dv.getUint8(0) !== FORMAT_VERSION) return null;
+  if (dv.getUint32(20) !== checksum(plain.slice(0, 20))) return null;
+  return {
+    balance: dv.getUint32(1),
+    ticketType: dv.getUint8(5),
+    zones: dv.getUint8(6),
+    validUntilMin: dv.getUint32(7),
+    lastKind: dv.getUint8(11),
+    lastAmount: dv.getUint16(12),
+    lastTicketType: dv.getUint8(14),
+    lastZones: dv.getUint8(15),
+    lastTimeMin: dv.getUint32(16)
+  };
+}
+
+function ticketName(type) {
+  if (type === 1) return "Jednorázová jízdenka";
+  if (type === 2) return "Celodenní jízdenka";
+  if (type === 3) return "Studentská jízdenka";
+  if (type === 4) return "Pásmová jízdenka PID";
+  if (type === 5) return "Vlastní cena";
+  return "Žádná";
+}
+
+function zoneText(z) {
+  if (!z) return "";
+  return `${z} ${z === 1 ? "pásmo" : z < 5 ? "pásma" : "pásem"}`;
+}
+
+function openVerifyScreen() {
+  const ov = document.getElementById("verifyOverlay");
+  ov.className = "show wait";
+  document.getElementById("verifyIcon").textContent = "⌛";
+  document.getElementById("verifyTitle").textContent = "Připraveno na ověření";
+  document.getElementById("verifyTicket").textContent = "Přilož kartu k NFC";
+  document.getElementById("verifyZones").textContent = "";
+  document.getElementById("verifyValid").textContent = "";
+}
+
+function showVerify(kind, icon, title, ticket, zones, valid) {
+  const ov = document.getElementById("verifyOverlay");
+  ov.className = "show " + kind;
+  document.getElementById("verifyIcon").textContent = icon;
+  document.getElementById("verifyTitle").textContent = title;
+  document.getElementById("verifyTicket").textContent = ticket;
+  document.getElementById("verifyZones").textContent = zones;
+  document.getElementById("verifyValid").textContent = valid;
+}
+
+function closeVerify() {
+  document.getElementById("verifyOverlay").className = "wait";
+  setStatus("Připraveno", "info");
+}
+
+async function initNFC() {
+  if (!("NDEFReader" in window)) {
+    setStatus("NFC není podporováno v tomto prohlížeči.", "error");
+    return;
+  }
+
+  try {
+    ndef = new NDEFReader();
+    await ndef.scan();
+    document.getElementById("btnNFC").disabled = true;
+    openVerifyScreen();
+    setStatus("NFC aktivní — přilož kartu.", "info");
+
+    ndef.onreading = (e) => handleReading(e);
+    ndef.onreadingerror = () => setStatus("Chyba čtení NFC.", "error");
+  } catch (err) {
+    setStatus("NFC zamítnuto nebo chyba: " + err, "error");
+  }
+}
+
+async function handleReading(event) {
+  if (busy) return;
+  busy = true;
+  try {
+    cardUid = event.serialNumber || "-";
+    document.getElementById("uid").textContent = cardUid;
+
+    let decoded = null;
+    for (const record of event.message.records) {
+      if (record.recordType === "mime" && record.mediaType === MIME_TYPE) {
+        const bytes = new Uint8Array(record.data.buffer, record.data.byteOffset, record.data.byteLength);
+        decoded = decodeCard(bytes);
+      }
+    }
+
+    if (!decoded) {
+      showVerify("none", "✖", "Neplatná data", "Na kartě není platný záznam", "", "");
+      setStatus("Karta neobsahuje platná data.", "error");
+      return;
+    }
+
+    const valid = decoded.validUntilMin * 60000 > Date.now();
+    const ticket = ticketName(decoded.ticketType);
+    const zones = zoneText(decoded.zones);
+    const validText = valid
+      ? "Platí do " + minToStr(decoded.validUntilMin)
+      : "Vypršela " + minToStr(decoded.validUntilMin);
+
+    if (decoded.ticketType && valid) {
+      showVerify("ok", "✔", "PLATNÁ", ticket, zones, validText);
+      setStatus("Jízdenka je platná.", "success");
+    } else if (decoded.ticketType && !valid) {
+      showVerify("bad", "✖", "NEPLATNÁ", ticket, zones, validText);
+      setStatus("Jízdenka je neplatná.", "error");
+    } else {
+      showVerify("none", "✖", "Žádná jízdenka", "Na kartě není jízdenka", "", "");
+      setStatus("Na kartě není jízdenka.", "error");
+    }
+  } catch (e) {
+    showVerify("none", "✖", "Chyba", String(e), "", "");
+    setStatus("Chyba: " + e, "error");
+  } finally {
+    busy = false;
+  }
+}
+
+document.getElementById("btnNFC").addEventListener("click", initNFC);
+openVerifyScreen();
+</script>
+</body>
+</html>
